@@ -112,7 +112,7 @@ impl RootNode {
                 let block_ref_ptr = current_block.as_ptr();
                 let block_ref = block_ref_ptr.read();
 
-                if block_ref.size <= size {
+                if size <= block_ref.size {
                     // rewire the link to skip the current node
                     prev_next_ptr.write(block_ref.next_free_block);
                     (*block_ref_ptr).next_free_block = None;

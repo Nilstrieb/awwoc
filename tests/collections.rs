@@ -10,16 +10,17 @@ fn boxed() {
     let mut boxed = Box::new(5);
 
     *boxed = 6;
-    
+
     assert_eq!(*boxed, 6);
 }
 
 #[test]
-#[ignore]
 fn vec() {
     let mut vec = Vec::new();
 
-    for i in 0..10_000 {
+    let len = if cfg!(miri) { 100 } else { 10_000 };
+
+    for i in 0..len {
         vec.push(i);
     }
 
@@ -27,11 +28,12 @@ fn vec() {
 }
 
 #[test]
-#[ignore]
 fn btree_map() {
     let mut map = BTreeMap::new();
 
-    for i in (0..1000).map(|i| i * 3) {
+    let len = if cfg!(miri) { 10 } else { 1000 };
+
+    for i in (0..len).map(|i| i * 3) {
         map.insert(i, i + 10);
     }
 
