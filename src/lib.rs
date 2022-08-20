@@ -29,32 +29,6 @@ const BLOCK_REF_BLOCK_AMOUNT: usize = BLOCK_REF_BLOCK_SIZE / std::mem::size_of::
 /// a terrible allocator that mmaps every single allocation. it's horrible. yeah.
 pub struct Awwoc;
 
-unsafe fn alloc_block_ref_block() -> Option<NonNull<BlockRef>> {
-    let new_ptr = map::map(BLOCK_REF_BLOCK_SIZE)?;
-
-    // we have to allocate some space for the BlockRefs themselves
-
-    let block = new_ptr.cast::<BlockRef>();
-    Some(block)
-}
-
-unsafe impl GlobalAlloc for Awwoc {
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        let mut root = lock(&ROOT);
-
-        match root.alloc_inner(layout) {
-            Some(ptr) => ptr.as_ptr(),
-            None => null_mut(),
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: std::alloc::Layout) {
-        let mut root = lock(&ROOT);
-
-        root.dealloc(ptr);
-    }
-}
-
 static ROOT: Mutex<RootNode> = Mutex::new(RootNode::new());
 
 /// ┌──────────────────────────────────────────────────────────────────────────┐
@@ -245,6 +219,32 @@ impl RootNode {
         for br_block_ptr in self.br_blocks() {
             map::unmap(br_block_ptr.cast::<u8>(), BLOCK_REF_BLOCK_SIZE);
         }
+    }
+}
+
+unsafe fn alloc_block_ref_block() -> Option<NonNull<BlockRef>> {
+    let new_ptr = map::map(BLOCK_REF_BLOCK_SIZE)?;
+
+    // we have to allocate some space for the BlockRefs themselves
+
+    let block = new_ptr.cast::<BlockRef>();
+    Some(block)
+}
+
+unsafe impl GlobalAlloc for Awwoc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let mut root = lock(&ROOT);
+
+        match root.alloc_inner(layout) {
+            Some(ptr) => ptr.as_ptr(),
+            None => null_mut(),
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: std::alloc::Layout) {
+        let mut root = lock(&ROOT);
+
+        root.dealloc(ptr);
     }
 }
 
