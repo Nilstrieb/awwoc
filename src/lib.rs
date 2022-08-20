@@ -42,9 +42,8 @@ unsafe impl GlobalAlloc for Awwoc {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         let mut root = lock(&BLOCK);
 
-        eprintln!("alloc....");
         match root.alloc_inner(layout) {
-            Some(ptr) => dbg!(ptr.as_ptr()),
+            Some(ptr) => ptr.as_ptr(),
             None => null_mut(),
         }
     }
@@ -109,6 +108,11 @@ struct RootNode {
     next_free_block: Option<NonNull<BlockRef>>,
 }
 
+struct BlockRefBlock {
+    start: NonNull<BlockRef>,
+    len: usize,
+}
+
 impl RootNode {
     unsafe fn find_in_free_list(&mut self, size: usize) -> Option<NonNull<u8>> {
         if let Some(mut current_block) = self.next_free_block {
@@ -137,11 +141,22 @@ impl RootNode {
         None
     }
 
-    #[inline(never)]
     unsafe fn new_blockref(&mut self) -> Option<NonNull<BlockRef>> {
-        let blockref_block_offset = self.block_count % BLOCK_REF_BLOCK_AMOUNT;
-        let new_block_ptr = if blockref_block_offset == 0 {
-            eprintln!("time to make a new blockref alloc");
+        let last_br_amount = self.block_count % BLOCK_REF_BLOCK_AMOUNT;
+
+        let new_block_ptr = if last_br_amount > 0 {
+            // just append another block
+            // last_block points the the correct br_block for adding a new br
+            // we just need to offset it
+            let last_block = self
+                .last_block
+                .unwrap_or_else(|| abort("last_block not found even though count is nonnull\n"));
+
+            let new_br_block = last_block.as_ptr().add(1);
+
+            self.last_block = NonNull::new(new_br_block);
+            new_br_block
+        } else {
             // our current blockref block is full, we need a new one
 
             let new_block_ref_block = alloc_block_ref_block()?;
@@ -152,24 +167,6 @@ impl RootNode {
             self.last_block = Some(new_block_ref_block);
 
             new_block_ref_block.as_ptr()
-        } else {
-            eprintln!("appending to current blockref alloc");
-
-            // just append another block
-            let last_block = self
-                .last_block
-                .unwrap_or_else(|| abort("last_block not found even though count is nonnull\n"));
-
-            let index_from_back = BLOCK_REF_BLOCK_AMOUNT - blockref_block_offset;
-
-            let new_block_ref_block = last_block.as_ptr().sub(index_from_back);
-
-            if let Some(last_ptr) = self.last_block {
-                (*last_ptr.as_ptr()).next = NonNull::new(new_block_ref_block);
-            }
-
-            self.last_block = NonNull::new(new_block_ref_block);
-            new_block_ref_block
         };
 
         NonNull::new(new_block_ptr)
@@ -183,28 +180,20 @@ impl RootNode {
             return Some(ptr);
         }
 
-        eprintln!("no free list");
-
         // nothing free, we have to allocate
 
         let prev_last_block = self.last_block;
 
         let new_blockref_ptr = self.new_blockref()?;
 
-        eprintln!("got block ref");
-
         let size = layout.size();
         let new_data_ptr = map::map(size)?;
-
-        eprintln!("mapped");
 
         self.block_count += 1;
 
         if let Some(prev_last_block) = prev_last_block {
             (*prev_last_block.as_ptr()).next = Some(new_blockref_ptr);
         }
-
-        eprintln!("what");
 
         new_blockref_ptr.as_ptr().write(BlockRef {
             start: new_data_ptr.as_ptr(),
@@ -213,14 +202,12 @@ impl RootNode {
             next_free_block: None,
         });
 
-        eprintln!("uwu what");
-
-        dbg!(Some(new_data_ptr))
+        Some(new_data_ptr)
     }
 }
 
+// SAFETY: I guess
 unsafe impl Send for RootNode {}
-unsafe impl Sync for RootNode {}
 
 #[repr(C)]
 struct BlockRef {
