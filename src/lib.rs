@@ -40,7 +40,7 @@ unsafe fn alloc_block_ref_block() -> Option<NonNull<BlockRef>> {
 
 unsafe impl GlobalAlloc for Awwoc {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        let mut root = lock(&BLOCK);
+        let mut root = lock(&ROOT);
 
         match root.alloc_inner(layout) {
             Some(ptr) => ptr.as_ptr(),
@@ -49,24 +49,19 @@ unsafe impl GlobalAlloc for Awwoc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: std::alloc::Layout) {
-        let mut root = lock(&BLOCK);
+        let mut root = lock(&ROOT);
 
         root.dealloc(ptr);
     }
 }
 
-static BLOCK: Mutex<RootNode> = Mutex::new(RootNode {
-    first_block: None,
-    last_block: None,
-    block_count: 0,
-    next_free_block: None,
-});
+static ROOT: Mutex<RootNode> = Mutex::new(RootNode::new());
 
 /// ┌──────────────────────────────────────────────────────────────────────────┐
-/// │                     ┌────────────────────────────┐                       │
-/// │                     │         RootNode           │                       │
-/// │                     │ first_block   last_block   │                       │
-/// │                     └───┬───────────────┬────────┘                       │
+/// │                     ┌──────────────────────────────────┐                 │
+/// │                     │         RootNode                 │                 │
+/// │                     │ first_blockref   last_blockref   │                 │
+/// │                     └───┬───────────────┬──────────────┘                 │
 /// │                         │               │                                │
 /// │  ┌──────────────────────┘          ┌────┘                                │
 /// │  ▼                                 ▼                                     │
@@ -84,10 +79,10 @@ static BLOCK: Mutex<RootNode> = Mutex::new(RootNode {
 struct RootNode {
     /// A pointer to the first blockref. Must point to a valid block or be None. If last_block is
     /// Some, this must be Some as well.
-    first_block: Option<NonNull<BlockRef>>,
+    first_blockref: Option<NonNull<BlockRef>>,
     /// A pointer to the last blockref. Must point to a valid blockref or be None. If first_block
     /// is Some, this must be Some as well.
-    last_block: Option<NonNull<BlockRef>>,
+    last_blockref: Option<NonNull<BlockRef>>,
     /// The amount of blocks currently stored. If it's bigger than BLOCK_REF_BLOCK_AMOUNT, then
     /// there are multiple blocks of blockrefs around.
     block_count: usize,
@@ -101,6 +96,15 @@ struct BlockRefBlock {
 }
 
 impl RootNode {
+    const fn new() -> Self {
+        Self {
+            first_blockref: None,
+            last_blockref: None,
+            block_count: 0,
+            next_free_block: None,
+        }
+    }
+
     unsafe fn find_in_free_list(&mut self, size: usize) -> Option<NonNull<u8>> {
         if let Some(mut current_block) = self.next_free_block {
             let mut prev_next_ptr = addr_of_mut!(self.next_free_block);
@@ -135,22 +139,28 @@ impl RootNode {
             // last_block points the the correct br_block for adding a new br
             // we just need to offset it
             let last_block = self
-                .last_block
+                .last_blockref
                 .unwrap_or_else(|| abort("last_block not found even though count is nonnull\n"));
 
             let new_br_block = last_block.as_ptr().add(1);
 
-            self.last_block = NonNull::new(new_br_block);
+            self.last_blockref = NonNull::new(new_br_block);
             new_br_block
         } else {
             // our current blockref block is full, we need a new one
 
             let new_block_ref_block = alloc_block_ref_block()?;
-            if let Some(last_ptr) = self.last_block {
+            if let Some(last_ptr) = self.last_blockref {
                 (*last_ptr.as_ptr()).next = Some(new_block_ref_block);
             }
 
-            self.last_block = Some(new_block_ref_block);
+            self.last_blockref = Some(new_block_ref_block);
+
+            if self.block_count == 0 {
+                self.first_blockref = Some(new_block_ref_block);
+            }
+
+            self.block_count += 1;
 
             new_block_ref_block.as_ptr()
         };
@@ -168,7 +178,7 @@ impl RootNode {
 
         // nothing free, we have to allocate
 
-        let prev_last_block = self.last_block;
+        let prev_last_block = self.last_blockref;
 
         let new_blockref_ptr = self.new_blockref()?;
 
@@ -191,23 +201,50 @@ impl RootNode {
         Some(new_data_ptr)
     }
 
+    fn blockrefs_mut(&mut self) -> impl Iterator<Item = *mut BlockRef> {
+        let mut option_block = self.first_blockref;
+
+        std::iter::from_fn(move || {
+            if let Some(block) = option_block {
+                let block_ptr = block.as_ptr();
+                option_block = unsafe { (*block_ptr).next };
+                Some(block_ptr)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn br_blocks(&mut self) -> impl Iterator<Item = *mut BlockRef> {
+        let mut index = 0;
+
+        self.blockrefs_mut().filter(move |_| {
+            let keep = index % BLOCK_REF_BLOCK_AMOUNT == 0;
+            index += 1;
+            keep
+        })
+    }
+
     unsafe fn dealloc(&mut self, ptr: *mut u8) {
-        let mut root = lock(&BLOCK);
-
-        let mut option_block = root.first_block;
-        while let Some(block) = option_block {
-            let block_ptr = block.as_ptr();
-
+        for block_ptr in self.blockrefs_mut() {
             if (*block_ptr).start == ptr {
-                let free = mem::replace(&mut root.next_free_block, Some(block));
+                let free = mem::replace(&mut self.next_free_block, NonNull::new(block_ptr));
                 (*block_ptr).next_free_block = free;
                 return;
             }
-
-            option_block = (*block_ptr).next;
         }
 
         abort("invalid pointer passed to dealloc\n");
+    }
+
+    unsafe fn cleanup(mut self) {
+        for block_ptr in self.blockrefs_mut() {
+            map::unmap((*block_ptr).start, BLOCK_REF_BLOCK_SIZE);
+        }
+
+        for br_block_ptr in self.br_blocks() {
+            map::unmap(br_block_ptr.cast::<u8>(), BLOCK_REF_BLOCK_SIZE);
+        }
     }
 }
 
@@ -221,4 +258,44 @@ struct BlockRef {
     next: Option<NonNull<BlockRef>>,
     /// only present on freed blocks
     next_free_block: Option<NonNull<BlockRef>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::alloc::Layout;
+
+    use crate::RootNode;
+
+    #[test]
+    fn alloc_dealloc() {
+        let mut alloc = RootNode::new();
+        unsafe {
+            let ptr = alloc.alloc_inner(Layout::new::<u64>()).unwrap().as_ptr();
+
+            ptr.write_volatile(6);
+
+            assert_eq!(ptr.read_volatile(), 6);
+
+            alloc.dealloc(ptr);
+
+            alloc.cleanup();
+        }
+    }
+
+    #[test]
+    fn reuse_freed() {
+        let mut alloc = RootNode::new();
+        unsafe {
+            let ptr = alloc.alloc_inner(Layout::new::<u64>()).unwrap().as_ptr();
+            let first_addr = ptr.addr();
+            alloc.dealloc(ptr);
+
+            let ptr2 = alloc.alloc_inner(Layout::new::<u64>()).unwrap().as_ptr();
+            ptr2.write_volatile(10);
+
+            assert_eq!(first_addr, ptr2.addr());
+
+            alloc.cleanup();
+        }
+    }
 }

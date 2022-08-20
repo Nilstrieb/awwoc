@@ -6,6 +6,16 @@ use awwoc::Awwoc;
 static AWWOC: Awwoc = Awwoc;
 
 #[test]
+fn boxed() {
+    let mut boxed = Box::new(5);
+
+    *boxed = 6;
+    
+    assert_eq!(*boxed, 6);
+}
+
+#[test]
+#[ignore]
 fn vec() {
     let mut vec = Vec::new();
 
@@ -17,6 +27,7 @@ fn vec() {
 }
 
 #[test]
+#[ignore]
 fn btree_map() {
     let mut map = BTreeMap::new();
 
