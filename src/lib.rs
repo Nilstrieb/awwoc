@@ -51,20 +51,7 @@ unsafe impl GlobalAlloc for Awwoc {
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: std::alloc::Layout) {
         let mut root = lock(&BLOCK);
 
-        let mut option_block = root.first_block;
-        while let Some(block) = option_block {
-            let block_ptr = block.as_ptr();
-
-            if (*block_ptr).start == ptr {
-                let free = mem::replace(&mut root.next_free_block, Some(block));
-                (*block_ptr).next_free_block = free;
-                return;
-            }
-
-            option_block = (*block_ptr).next;
-        }
-
-        abort("invalid pointer passed to dealloc\n");
+        root.dealloc(ptr);
     }
 }
 
@@ -137,7 +124,6 @@ impl RootNode {
                 }
             }
         }
-
         None
     }
 
@@ -203,6 +189,25 @@ impl RootNode {
         });
 
         Some(new_data_ptr)
+    }
+
+    unsafe fn dealloc(&mut self, ptr: *mut u8) {
+        let mut root = lock(&BLOCK);
+
+        let mut option_block = root.first_block;
+        while let Some(block) = option_block {
+            let block_ptr = block.as_ptr();
+
+            if (*block_ptr).start == ptr {
+                let free = mem::replace(&mut root.next_free_block, Some(block));
+                (*block_ptr).next_free_block = free;
+                return;
+            }
+
+            option_block = (*block_ptr).next;
+        }
+
+        abort("invalid pointer passed to dealloc\n");
     }
 }
 
