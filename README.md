@@ -27,3 +27,4 @@ to your wust pwogwam.
 ## unwuckily
 
 awwoc only works on GNU/Winyux, or other posix opewating system kewnels.
+it also works on every platform using miwi!
